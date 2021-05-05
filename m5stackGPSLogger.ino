@@ -32,7 +32,7 @@ TaskHandle_t gpsLoggingTaskHandler = NULL;
 
 // for lap timer
 bool isLapTimerOn = false;
-struct DATETIME
+struct TIME
 {
   uint8_t hour;
   uint8_t minute;
@@ -40,8 +40,8 @@ struct DATETIME
   uint8_t centisecond;
 };
 uint8_t lapNum;
-DATETIME times[100];
-DATETIME laps[100];
+TIME times[100];
+TIME laps[100];
 uint8_t fastestLap;
 
 bool LapBtnLongPressed = false;
@@ -49,22 +49,22 @@ bool LapBtnLongPressed = false;
 bool gpsLapBtnLongPressed = false;
 bool gpsLapTimerEnable = true;
 
-// TODO: struct
-double lat = 0, lng = 0, altitude = 0, kmph = 0, deg = 0;
+double lat = 0, lng = 0, altitude = 0, kmph = 0;
+// double deg = 0;
 uint32_t sat = 0, age = 0;
 uint16_t hdop = 0;
 uint16_t year = 0;
 uint8_t month = 0, day = 0;
-uint8_t hour = 0, minute = 0, second = 0, centisecond = 0;
+TIME gpsTime = {0, 0, 0, 0};
 
 // gps lap timer
-double target_lat = 0.0;
-double target_lng = 0.0;
-double target_distance_meter = 999;
-unsigned int distance_threathold_meter = 30;
-bool is_in_area = false;
+double targetLat = 0.0;
+double targetLng = 0.0;
+double targetDistanceMeter = 999;
+uint8_t distanceThreatholdMeter = 30;
+bool isInArea = false;
 
-char *config_file_path = "/config.txt";
+char config_file_path[] = "/config.txt";
 
 void setup()
 {
@@ -80,10 +80,8 @@ void setup()
   startGPS(115200);
 
   initSprite();
-
   loadConfig();
-  drawHelloWorld();
-
+  drawLoading();
   resetLap();
 
   // create gps logging task
@@ -95,12 +93,11 @@ void loop()
   M5.update();
   fillTFT();
 
-  drawDateTime(0);
-  drawSatellitesInfo(0);
+  drawDateTime(HEIGHT_UNIT * 0);
+  drawSatellitesInfo(HEIGHT_UNIT * 0);
   drawLatLng(HEIGHT_UNIT * 1);
   drawSpeed(HEIGHT_UNIT * 2);
   drawTimer(HEIGHT_UNIT * 2 + BIG_TEXT_SIZE * HEIGHT_UNIT * 1);
-
   drawLoggingStatus(DISPLAY_HEIGHT - HEIGHT_UNIT * 2);
   buttonCheck(DISPLAY_HEIGHT - HEIGHT_UNIT * 1);
 
@@ -134,27 +131,27 @@ void logGPS()
   // logging gpx
   char str[200];
   sprintf(str, "<wpt lat=\"%9.6f\" lon=\"%9.6f\"><ele>%.1f</ele><time>%04d-%02d-%02dT%02d:%02d:%02d.%dZ</time><sat>%d</sat><hdop>%d</hdop></wpt>",
-          lat, lng, altitude, year, month, day, hour, minute, second, centisecond, sat, hdop);
+          lat, lng, altitude, year, month, day, gpsTime.hour, gpsTime.minute, gpsTime.second, gpsTime.centisecond, sat, hdop);
   Serial.println(str);
 
-  if (f & enableLogging)
+  if (!f || !enableLogging)
   {
-    // </gpx>\n\0 = 8 chars
-    if (!f.seek(f.position() - 8))
-    {
-      // char buf_str[100];
-      // sprintf(buf_str, "seek miss %d", f.position());
-      // Serial.println(buf_str);
-      return;
-    }
-    f.println(str);
-    f.println(F(GPX_END_TAG));
-    f.flush();
-
-    char buf[100];
-    sprintf(buf, "logged! %f", target_distance_meter);
-    Serial.println(buf);
+    return;
   }
+  // </gpx>\n\0 = 8 chars
+  if (!f.seek(f.position() - 8))
+  {
+    // seek miss
+    return;
+  }
+
+  f.println(str);
+  f.println(F(GPX_END_TAG));
+  f.flush();
+
+  char buf[40];
+  sprintf(buf, "logged! %f", targetDistanceMeter);
+  Serial.println(buf);
 }
 
 void fillTFT()
@@ -170,7 +167,9 @@ void flushSprite()
 bool updateGPSValue()
 {
   while (ss.available() > 0)
+  {
     gps.encode(ss.read());
+  }
 
   bool updated = false;
 
@@ -181,12 +180,9 @@ bool updateGPSValue()
     uint8_t _second = gps.time.second();
     uint8_t _centisecond = gps.time.centisecond();
 
-    if (_hour != hour || _minute != minute || _second != second || centisecond != _centisecond)
+    if (_hour != gpsTime.hour || _minute != gpsTime.minute || _second != gpsTime.second || _centisecond != gpsTime.centisecond)
     {
-      hour = _hour;
-      minute = _minute;
-      second = _second;
-      centisecond = _centisecond;
+      gpsTime = {_hour, _minute, _second, _centisecond};
       updated = true;
     }
     else
@@ -194,13 +190,11 @@ bool updateGPSValue()
       return false;
     }
   }
-
   if (gps.location.isUpdated())
   {
     lat = gps.location.lat();
     lng = gps.location.lng();
   }
-
   if (gps.altitude.isUpdated())
   {
     altitude = gps.altitude.meters();
@@ -221,133 +215,140 @@ bool updateGPSValue()
     month = gps.date.month();
     day = gps.date.day();
   }
-
   if (gps.speed.isUpdated())
   {
     kmph = gps.speed.kmph();
   }
+  /*
   if (gps.course.isUpdated())
   {
     deg = gps.course.deg();
   }
-
+  */
   return updated && gps.location.isValid();
 }
 
 void update_gps()
 {
   static int16_t gpsUpdatedCnt = 0;
-  bool updated = updateGPSValue();
-
-  if (updated)
+  if (!updateGPSValue())
   {
-    if (gpsUpdatedCnt < 20)
+    return;
+  }
+  if (gpsUpdatedCnt < 20)
+  {
+    // 安定化のために初期のデータは捨てる
+    gpsUpdatedCnt++;
+    return;
+  }
+
+  if (!isLogging && enableLogging)
+  {
+    Serial.println("log start");
+    sprintf(logfilename, "/%04d%02d%02d_%02d%02d%02d.gpx", year, month, day,
+            (gpsTime.hour + 9) % 24, gpsTime.minute, gpsTime.second);
+    Serial.println(logfilename);
+    f = SD.open(logfilename, FILE_WRITE);
+    if (f)
     {
-      // 安定化のために初期のデータは捨てる
-      gpsUpdatedCnt++;
-      return;
+      f.println(F(GPS_XML_TAG));
+      f.println(F(GPX_START_TAG));
+      f.println(F(GPX_END_TAG));
+      f.flush();
+      isLogging = true;
     }
+  }
 
-    if (!isLogging && enableLogging)
+  if (isLogging)
+  {
+    logGPS();
+  }
+
+  updateGpsLapTimer();
+}
+
+void updateGpsLapTimer()
+{
+  if (!gpsLapTimerEnable)
+  {
+    return;
+  }
+
+  if (targetLat != 0.0 && targetLng != 0.0)
+  {
+    targetDistanceMeter = calcDistance(lat, lng, targetLat, targetLng);
+  }
+
+  // エリア内にいる
+  if (targetDistanceMeter < distanceThreatholdMeter)
+  {
+    isInArea = true;
+  }
+  // エリアから出た瞬間
+  else if (isInArea)
+  {
+    isInArea = false;
+
+    if (!isLapTimerOn)
     {
-      Serial.println("log start");
-      sprintf(logfilename, "/%04d%02d%02d_%02d%02d%02d.gpx", year, month, day, (hour + 9) % 24, minute, second);
-      Serial.println(logfilename);
-      f = SD.open(logfilename, FILE_WRITE);
-      if (f)
-      {
-        f.println(F(GPS_XML_TAG));
-        f.println(F(GPX_START_TAG));
-        f.println(F(GPX_END_TAG));
-        f.flush();
-        isLogging = true;
-      }
+      startLap(gpsTime);
     }
-
-    if (isLogging)
+    else
     {
-      logGPS();
-    }
-
-    updateTargetDistance();
-
-    if (gpsLapTimerEnable)
-    {
-      if (target_distance_meter < distance_threathold_meter)
-      {
-        is_in_area = true;
-      }
-      else
-      {
-        if (is_in_area)
-        {
-          is_in_area = false;
-
-          if (!isLapTimerOn)
-          {
-            startLap({hour, minute, second, centisecond});
-          }
-          else
-          {
-            plusLap({hour, minute, second, centisecond});
-          }
-        }
-      }
+      plusLap(gpsTime);
     }
   }
 }
 
 void drawSatellitesInfo(uint8_t poY)
 {
-  char str[100];
+  char str[30];
   sprintf(str, "%2d GPS(hdop=%3d,age=%2d)", sat, hdop, age);
   spr.drawString(str, DISPLAY_WIDTH - 26 * CHAR_WIDTH, poY);
 }
 
 void drawLatLng(uint8_t poY)
 {
-  char str[100];
+  char str[30];
   sprintf(str, "%9.6f,%9.6f %4.1fm", lat, lng, altitude);
   spr.drawString(str, 0, poY);
 }
 
 void drawSpeed(uint8_t poY)
 {
-  char str[100];
+  char str[10];
   // const char *cardinal = TinyGPSPlus::cardinal(deg);
   sprintf(str, "%4.1fkm/s", kmph);
   spr.setTextSize(BIG_TEXT_SIZE);
-  // CHAR_WIDTH * display_size * char length
   spr.drawString(str, DISPLAY_WIDTH - (CHAR_WIDTH * BIG_TEXT_SIZE * 8), poY);
   spr.setTextSize(1);
 }
 
 void drawTimer(uint8_t poY)
 {
-  char str[100];
+  char str[30];
 
-  uint8_t prev_lap = max(0, lapNum - 1);
-  uint8_t target_lap = lapNum;
+  uint8_t prevLap = max(0, lapNum - 1);
 
   spr.setTextSize(2);
   sprintf(str, "FAST%02d", fastestLap);
   spr.drawString(str, 0, poY);
-  sprintf(str, "LAP.%02d", prev_lap);
+  sprintf(str, "LAP.%02d", prevLap);
   spr.drawString(str, 0, poY + BIG_TEXT_SIZE * HEIGHT_UNIT * 1);
-  sprintf(str, "LAP.%02d", target_lap);
+  sprintf(str, "LAP.%02d", lapNum);
   spr.drawString(str, 0, poY + BIG_TEXT_SIZE * HEIGHT_UNIT * 2);
 
   spr.setTextSize(BIG_TEXT_SIZE);
 
-  DATETIME laptime = laps[fastestLap];
+  TIME laptime = laps[fastestLap];
   sprintf(str, "%02d:%02d.%02d", laptime.minute, laptime.second, laptime.centisecond);
   spr.drawString(str, DISPLAY_WIDTH - (CHAR_WIDTH * BIG_TEXT_SIZE * 8), poY);
 
-  laptime = laps[prev_lap];
+  laptime = laps[prevLap];
   sprintf(str, "%02d:%02d.%02d", laptime.minute, laptime.second, laptime.centisecond);
   spr.drawString(str, DISPLAY_WIDTH - (CHAR_WIDTH * BIG_TEXT_SIZE * 8), poY + BIG_TEXT_SIZE * HEIGHT_UNIT * 1);
 
-  laptime = laps[target_lap];
+  laptime = laps[lapNum];
   sprintf(str, "%02d:%02d.%02d", laptime.minute, laptime.second, laptime.centisecond);
   spr.drawString(str, DISPLAY_WIDTH - (CHAR_WIDTH * BIG_TEXT_SIZE * 8), poY + BIG_TEXT_SIZE * HEIGHT_UNIT * 2);
 
@@ -356,21 +357,22 @@ void drawTimer(uint8_t poY)
 
 void drawLoggingStatus(uint8_t poY)
 {
-  char str[100];
+  char str[80];
   sprintf(str, "%s  %3.1f%s%u %9.6f,%9.6f",
-          logfilename, target_distance_meter, target_distance_meter < distance_threathold_meter ? "<" : ">",
-          distance_threathold_meter, target_lat, target_lng);
+          logfilename, targetDistanceMeter, targetDistanceMeter < distanceThreatholdMeter ? "<" : ">",
+          distanceThreatholdMeter, targetLat, targetLng);
   spr.drawString(str, 0, poY);
 }
 
 void drawDateTime(uint8_t poY)
 {
-  char str[100];
-  sprintf(str, "%04d-%02d-%02d %02d:%02d:%02d.%02d", year, month, day, (hour + 9) % 24, minute, second, centisecond);
+  char str[30];
+  sprintf(str, "%04d-%02d-%02d %02d:%02d:%02d.%02d", year, month, day,
+          (gpsTime.hour + 9) % 24, gpsTime.minute, gpsTime.second, gpsTime.centisecond);
   spr.drawString(str, 0, poY);
 }
 
-void drawHelloWorld()
+void drawLoading()
 {
   M5.Lcd.setBrightness(255);
   M5.Lcd.print("initialize...");
@@ -386,35 +388,40 @@ void initSprite()
   spr.setTextColor(TFT_WHITE, TFT_BLACK);
 }
 
-void set_point()
+void setPoint()
 {
-  target_lat = lat;
-  target_lng = lng;
+  targetLat = lat;
+  targetLng = lng;
   saveConfig();
 }
 
 void saveConfig()
 {
   File config = SD.open(config_file_path, FILE_WRITE);
-  if (config)
+  if (!config)
   {
-    char buf[100];
-    sprintf(buf, "%9.6f", target_lat);
-    config.println(buf);
-    sprintf(buf, "%9.6f", target_lng);
-    config.println(buf);
+    return;
   }
+  char buf[20];
+  sprintf(buf, "%9.6f", targetLat);
+  config.println(buf);
+  sprintf(buf, "%9.6f", targetLng);
+  config.println(buf);
+  sprintf(buf, "%d", distanceThreatholdMeter);
+  config.println(buf);
   config.close();
 }
 
 void loadConfig()
 {
   File config = SD.open(config_file_path, FILE_READ);
-  if (config)
+  if (!config)
   {
-    target_lat = config.parseFloat();
-    target_lng = config.parseFloat();
+    return;
   }
+  targetLat = config.parseFloat();
+  targetLng = config.parseFloat();
+  distanceThreatholdMeter = config.parseInt();
   config.close();
 }
 
@@ -423,17 +430,7 @@ double calcDistance(double lat1, double lng1, double lat2, double lng2)
 {
   double X = (lng2 - lng1) * cos(lat1) * 40075000 / 360.0;
   double Y = (lat2 - lat1) * 40009000 / 360.0;
-  double X2 = X * X;
-  double Y2 = Y * Y;
-  return sqrt(X2 + Y2);
-}
-
-void updateTargetDistance()
-{
-  if (target_lat != 0.0 and target_lng != 0.0)
-  {
-    target_distance_meter = calcDistance(lat, lng, target_lat, target_lng);
-  }
+  return sqrt(X * X + Y * Y);
 }
 
 void buttonCheck(uint8_t poY)
@@ -474,7 +471,7 @@ void gpslapButton(uint8_t poY)
     if (!gpsLapBtnLongPressed)
     {
       gpsLapBtnLongPressed = true;
-      set_point();
+      setPoint();
     }
   }
   if (M5.BtnB.wasReleased())
@@ -503,7 +500,7 @@ void resetLap()
   fastestLap = 0;
 }
 
-void startLap(DATETIME time_now)
+void startLap(TIME &time_now)
 {
   isLapTimerOn = true;
   if (lapNum == 0)
@@ -522,7 +519,7 @@ void stopLap()
   isLapTimerOn = false;
 }
 
-void plusLap(DATETIME time_now)
+void plusLap(TIME &time_now)
 {
   times[lapNum] = time_now;
   updateLap(time_now);
@@ -535,21 +532,16 @@ void plusLap(DATETIME time_now)
   lapNum = (lapNum + 1) % 100;
 }
 
-void updateLap(DATETIME time_now)
+void updateLap(TIME &time_now)
 {
-  if (isLapTimerOn)
+  if (isLapTimerOn && lapNum != 0)
   {
-    if (lapNum != 0)
-    {
-      laps[lapNum] = timediff(times[lapNum - 1], time_now);
-    }
+    laps[lapNum] = timediff(times[lapNum - 1], time_now);
   }
 }
 
 void lapButton(uint8_t poY)
 {
-  DATETIME time_now = {hour, minute, second, centisecond};
-
   if (M5.BtnC.pressedFor(500))
   {
     if (!LapBtnLongPressed)
@@ -582,12 +574,12 @@ void lapButton(uint8_t poY)
       if (isLapTimerOn)
       {
         // ラップタイマー実行中にタップでラップ計測
-        plusLap(time_now);
+        plusLap(gpsTime);
       }
       else
       {
         // ラップタイマー停止中にタップでスタート
-        startLap(time_now);
+        startLap(gpsTime);
       }
     }
   }
@@ -595,7 +587,7 @@ void lapButton(uint8_t poY)
   {
     if (isLapTimerOn)
     {
-      updateLap(time_now);
+      updateLap(gpsTime);
       spr.drawString("   LAP(STOP)", DISPLAY_WIDTH - 12 * CHAR_WIDTH, poY);
     }
     else
@@ -605,7 +597,7 @@ void lapButton(uint8_t poY)
   }
 }
 
-DATETIME timediff(DATETIME t1, DATETIME t2)
+TIME timediff(TIME &t1, TIME &t2)
 {
   int8_t diff_centisecond = t2.centisecond - t1.centisecond;
   int8_t diff_second = t2.second - t1.second;
@@ -635,10 +627,10 @@ DATETIME timediff(DATETIME t1, DATETIME t2)
   return {(uint8_t)diff_hour, (uint8_t)diff_minute, (uint8_t)diff_second, (uint8_t)diff_centisecond};
 }
 
-int compare(DATETIME t1, DATETIME t2)
+int compare(TIME &t1, TIME &t2)
 {
-  int a = t1.hour * 1000000 + t1.minute * 10000 + t1.second * 100 + t1.centisecond;
-  int b = t2.hour * 1000000 + t2.minute * 10000 + t2.second * 100 + t2.centisecond;
+  uint32_t a = t1.hour * 1000000 + t1.minute * 10000 + t1.second * 100 + t1.centisecond;
+  uint32_t b = t2.hour * 1000000 + t2.minute * 10000 + t2.second * 100 + t2.centisecond;
 
   if (a > b)
   {
